@@ -1,0 +1,68 @@
+# services:
+#   sqlserver:
+#     image: mcr.microsoft.com/mssql/server:2022-latest
+#     container_name: mssql2022
+#     environment:
+#       - ACCEPT_EULA=Y
+#       - SA_PASSWORD=Pete.181042
+#     ports:
+#       - "1433:1433"
+#     volumes:
+#       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+#     healthcheck:
+#       test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "StrongPassw0rd!", "-C", "-Q", "SELECT 1"]
+#       interval: 10s
+#       timeout: 5s
+#       retries: 10
+
+
+
+
+# version: "3.9"
+services:
+  api:
+    build: .
+    container_name: go-api
+    env_file: .env
+    ports:
+      - "8080:8080"           # เปิดพอร์ต 8080 บน "เครื่องโฮสต์" ให้คนอื่นยิงได้
+    depends_on:
+      mssql:
+        condition: service_healthy
+    networks:
+      - appnet
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64  
+    container_name: mssql
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=${SA_PASSWORD}
+    ports:
+      - "1433:1433"           # ถ้าต้องการให้คนอื่นต่อ DB โดยตรงด้วย
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P ${SA_PASSWORD} -Q \"SELECT 1\" || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - appnet
+
+  db-init:
+    image: mcr.microsoft.com/mssql-tools
+    container_name: db-init
+    depends_on:
+      mssql:
+        condition: service_healthy
+    volumes:
+      - ./db/init.sql:/init.sql:ro
+    env_file: .env
+    entrypoint: ["/bin/bash","-lc","/opt/mssql-tools/bin/sqlcmd -S mssql -U sa -P ${SA_PASSWORD} -d master -i /init.sql"]
+    networks:
+      - appnet
+    restart: "no"
+
+networks:
+  appnet:
+    driver: bridge

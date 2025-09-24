@@ -537,8 +537,11 @@ func (r *Repo) ComputeSummary(ctx context.Context, formID, userID int) (EvalSumm
 
 	// KPI %
 	if err := r.DB.QueryRowContext(ctx, `
-SELECT ISNULL(SUM( (CASE WHEN ku.max_score>0 THEN (ku.score/ku.max_score) ELSE 0 END) * ku.weight ),0)
-FROM dbo.eval_kpi_user ku WHERE ku.assignment_id=@p1;`, aid).Scan(&out.KPIPct); err != nil {
+SELECT ISNULL(
+    (SUM(CASE WHEN ku.max_score>0 THEN (ku.score/ku.max_score) * ku.weight ELSE 0 END) 
+     / NULLIF(SUM(ku.weight),0)) * 100, 0)
+FROM dbo.eval_kpi_user ku 
+WHERE ku.assignment_id=@p1;`, aid).Scan(&out.KPIPct); err != nil {
 		return out, err
 	}
 
@@ -715,6 +718,7 @@ ORDER BY idx, id;`, aid)
 	return out, nil
 }
 
+// AddEvalSteps: คนแรก status=1, ที่เหลือ 0
 func (r *Repo) AddEvalSteps(ctx context.Context, assignmentID int, evaluators []int) ([]EvalStep, error) {
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -726,16 +730,16 @@ func (r *Repo) AddEvalSteps(ctx context.Context, assignmentID int, evaluators []
 		}
 	}()
 
-	// 1) INSERT + OUTPUT เฉพาะคอลัมน์ของ eval_step
 	stmt, err := tx.PrepareContext(ctx, `
-INSERT INTO dbo.eval_step(assignment_id, idx, evaluator_id)
+INSERT INTO dbo.eval_step (assignment_id, idx, evaluator_id, status, created_at, updated_at)
 OUTPUT inserted.id,
        inserted.assignment_id,
        inserted.idx,
        inserted.evaluator_id,
        inserted.status,
        CONVERT(varchar(10), inserted.eval_date, 23)
-VALUES (@p1, @p2, @p3);`)
+VALUES (@p1, @p2, @p3, @p4, SYSUTCDATETIME(), SYSUTCDATETIME());
+`)
 	if err != nil {
 		return nil, err
 	}
@@ -743,14 +747,19 @@ VALUES (@p1, @p2, @p3);`)
 
 	var out []EvalStep
 	for i, ev := range evaluators {
+		st := 0
+		if i == 0 {
+			st = 1 // คนแรก active เสมอ
+		}
+
 		var s EvalStep
-		if err = stmt.QueryRowContext(ctx, assignmentID, i+1, ev).
+		if err = stmt.QueryRowContext(ctx, assignmentID, i+1, ev, st).
 			Scan(&s.ID, &s.AssignmentID, &s.Idx, &s.EvaluatorID, &s.Status, &s.EvalDate); err != nil {
 			return nil, err
 		}
 
-		// 2) เติมชื่อผู้ประเมินด้วย SELECT แยก (OUTPUT อ้างตารางอื่นตรง ๆ ไม่ได้)
-		_ = r.DB.QueryRowContext(ctx, `SELECT name FROM dbo.users WHERE id=@p1;`, s.EvaluatorID).
+		// เติมชื่อผู้ประเมิน (ใช้ tx ให้คง transaction เดียวกัน)
+		_ = tx.QueryRowContext(ctx, `SELECT name FROM dbo.users WHERE id=@p1;`, s.EvaluatorID).
 			Scan(&s.EvaluatorName)
 
 		out = append(out, s)
@@ -789,24 +798,76 @@ ORDER BY es.idx;`
 	return out, rows.Err()
 }
 
+// UpdateEvalStep: ถ้าเปลี่ยนเป็น 2=done → เปิด idx ถัดไปเป็น 1 (ถ้ายังไม่มี active)
 func (r *Repo) UpdateEvalStep(ctx context.Context, stepID int, status int, evalDate string) (EvalStep, bool, error) {
-	const q = `
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return EvalStep{}, false, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// lock แถวนี้ก่อน (กันชนกัน) และดึง assignment_id, idx
+	var assignmentID, idx int
+	if err = tx.QueryRowContext(ctx, `
+SELECT assignment_id, idx
+FROM dbo.eval_step WITH (UPDLOCK, ROWLOCK)
+WHERE id=@p1;
+`, stepID).Scan(&assignmentID, &idx); err != nil {
+		if err == sql.ErrNoRows {
+			return EvalStep{}, false, nil
+		}
+		return EvalStep{}, false, err
+	}
+
+	// อัปเดตสถานะ + eval_date แล้ว OUTPUT ค่าที่ต้องการ
+	var s EvalStep
+	if err = tx.QueryRowContext(ctx, `
 UPDATE es
-SET es.status=@p2, es.eval_date=NULLIF(@p3,''), es.updated_at=SYSUTCDATETIME()
+SET es.status=@p2,
+    es.eval_date=NULLIF(@p3,''),
+    es.updated_at=SYSUTCDATETIME()
 OUTPUT inserted.id, inserted.assignment_id, inserted.idx,
-       inserted.evaluator_id, u.name, inserted.status,
-       CONVERT(varchar(10), inserted.eval_date, 23)
+       inserted.evaluator_id, u.name,
+       inserted.status, CONVERT(varchar(10), inserted.eval_date, 23)
 FROM dbo.eval_step es
 JOIN dbo.users u ON u.id = es.evaluator_id
-WHERE es.id=@p1;`
-
-	var s EvalStep
-	err := r.DB.QueryRowContext(ctx, q, stepID, status, evalDate).
-		Scan(&s.ID, &s.AssignmentID, &s.Idx, &s.EvaluatorID, &s.EvaluatorName, &s.Status, &s.EvalDate)
-	if err == sql.ErrNoRows {
-		return EvalStep{}, false, nil
+WHERE es.id=@p1;
+`, stepID, status, evalDate).
+		Scan(&s.ID, &s.AssignmentID, &s.Idx, &s.EvaluatorID, &s.EvaluatorName, &s.Status, &s.EvalDate); err != nil {
+		if err == sql.ErrNoRows {
+			return EvalStep{}, false, nil
+		}
+		return EvalStep{}, false, err
 	}
-	if err != nil {
+
+	// ถ้าจบ → เปิดคนถัดไป (idx+1) เป็น 1 เฉพาะเมื่อไม่มี active อยู่แล้ว
+	if status == 2 {
+		var activeCnt int
+		if err = tx.QueryRowContext(ctx, `
+SELECT COUNT(1)
+FROM dbo.eval_step WITH (UPDLOCK, ROWLOCK)
+WHERE assignment_id=@p1 AND status=1;
+`, assignmentID).Scan(&activeCnt); err != nil {
+			return EvalStep{}, false, err
+		}
+
+		if activeCnt == 0 {
+			// เปิดเฉพาะแถวถัดไปที่ยังเป็น 0
+			if _, err = tx.ExecContext(ctx, `
+UPDATE dbo.eval_step
+SET status=1, updated_at=SYSUTCDATETIME()
+WHERE assignment_id=@p1 AND idx=@p2 AND status=0;
+`, assignmentID, idx+1); err != nil {
+				return EvalStep{}, false, err
+			}
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
 		return EvalStep{}, false, err
 	}
 	return s, true, nil

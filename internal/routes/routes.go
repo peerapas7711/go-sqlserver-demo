@@ -42,12 +42,10 @@ func Register(app *fiber.App, opt Options) {
 	ag.Post("/login", ah.Login)
 	ag.Get("/user", auth.JWTMiddleware(opt.JWTSecret), ah.GetUser)
 
-	// ---- time attendance (ใหม่) ----
 	taRepo := timeattendance.NewRepo(opt.DB)
 	taH := timeattendance.NewHandler(taRepo)
 	taH.RegisterRoutes(api.Group("/users", auth.JWTMiddleware(opt.JWTSecret)))
 
-	// evaluation (form only)
 	evRepo := eval.NewRepo(opt.DB)
 	evH := eval.NewHandler(evRepo)
 	evH.RegisterRoutes(api.Group("/eval", auth.JWTMiddleware(opt.JWTSecret)))

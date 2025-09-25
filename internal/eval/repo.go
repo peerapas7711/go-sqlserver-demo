@@ -394,7 +394,8 @@ func (r *Repo) SaveAll(ctx context.Context, formID, userID int, in SaveAllInput)
 		return 0, err
 	}
 
-	if a.Status == 1 {
+	// ห้ามแก้ถ้า assignment ถูก lock แล้ว (status=2)
+	if a.Status == 2 {
 		return 0, ErrAlreadySubmitted
 	}
 
@@ -492,10 +493,10 @@ WHEN NOT MATCHED THEN INSERT(assignment_id, q1, q2, q3, q4, q5) VALUES(s.assignm
 		return 0, err
 	}
 
-	/* ---- สถานะ draft/submit ---- */
-	status := 0
-	if in.Status == SaveSubmit {
-		status = 1
+	/* ---- อัปเดตสถานะ assignment ---- */
+	status := in.Status
+	if status < 0 || status > 2 {
+		status = 0
 	}
 	if _, err = tx.ExecContext(ctx,
 		`UPDATE dbo.eval_assignment SET status=@p2, updated_at=SYSUTCDATETIME() WHERE id=@p1;`,
@@ -504,10 +505,54 @@ WHEN NOT MATCHED THEN INSERT(assignment_id, q1, q2, q3, q4, q5) VALUES(s.assignm
 		return 0, err
 	}
 
+	// --- Hook: เดิน step-flow เฉพาะตอน submit (status=2) ---
+	if status == 2 {
+		if err = r.completeActiveStepAndOpenNext(ctx, tx, a.ID); err != nil {
+			return 0, err
+		}
+	}
+
 	if err = tx.Commit(); err != nil {
 		return 0, err
 	}
 	return a.ID, nil
+}
+
+// completeActiveStepAndOpenNext: ปิด step ที่กำลัง active (1) เป็น 2 แล้วเปิดคนถัดไป (0→1)
+func (r *Repo) completeActiveStepAndOpenNext(ctx context.Context, tx *sql.Tx, assignmentID int) error {
+	// หา step ที่กำลัง active
+	var stepID, idx int
+	err := tx.QueryRowContext(ctx, `
+SELECT TOP(1) id, idx
+FROM dbo.eval_step WITH (UPDLOCK, ROWLOCK)
+WHERE assignment_id=@p1 AND status=1
+ORDER BY idx;`, assignmentID).Scan(&stepID, &idx)
+	if err == sql.ErrNoRows {
+		// ถ้าไม่มี active อยู่ แต่มี step ที่ยังเป็น 0 ให้เปิดตัวแรกเป็น 1
+		_, _ = tx.ExecContext(ctx, `
+UPDATE es SET es.status=1, es.updated_at=SYSUTCDATETIME()
+FROM dbo.eval_step es
+WHERE es.assignment_id=@p1 AND es.idx=1 AND es.status=0;`, assignmentID)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	// ปิดแถวนี้เป็น 2
+	if _, err = tx.ExecContext(ctx, `
+UPDATE dbo.eval_step
+SET status=2, eval_date=CONVERT(date, SYSUTCDATETIME()), updated_at=SYSUTCDATETIME()
+WHERE id=@p1;`, stepID); err != nil {
+		return err
+	}
+
+	// เปิด idx ถัดไป (เฉพาะที่ยังเป็น 0)
+	_, err = tx.ExecContext(ctx, `
+UPDATE dbo.eval_step
+SET status=1, updated_at=SYSUTCDATETIME()
+WHERE assignment_id=@p1 AND idx=@p2 AND status=0;`, assignmentID, idx+1)
+	return err
 }
 
 // Summary หลังบันทึก

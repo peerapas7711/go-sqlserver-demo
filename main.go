@@ -22,8 +22,8 @@ func mustEnv(key, def string) string {
 }
 
 func main() {
-	// _ = godotenv.Load(".env.local") // ถ้ามีจะ override
-	_ = godotenv.Load() // โหลด .env ปกติ (ใช้กับ Docker)
+	_ = godotenv.Load(".env.local") // ถ้ามีจะ override
+	// _ = godotenv.Load() // โหลด .env ปกติ (ใช้กับ Docker)
 
 	app := fiber.New()
 	app.Use(logger.New())

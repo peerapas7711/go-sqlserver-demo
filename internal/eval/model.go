@@ -115,12 +115,12 @@ type CompBulkInput struct {
 }
 
 // Save
-type SaveStatus string
+// type SaveStatus string
 
-const (
-	SaveDraft  SaveStatus = "draft"
-	SaveSubmit SaveStatus = "submitted"
-)
+// const (
+// 	SaveDraft  SaveStatus = "draft"
+// 	SaveSubmit SaveStatus = "submitted"
+// )
 
 type SaveKPIInput = MyKPIInput // ใช้โครงเดิมที่คุณมี (idx, code, title, max_score, weight, expected_score, score, note, measure, criteria, unit)
 
@@ -152,7 +152,7 @@ type AdditionalInput struct {
 }
 
 type SaveAllInput struct {
-	Status           SaveStatus         `json:"status"`
+	Status           int                `json:"status"`
 	DueDate          string             `json:"due_date,omitempty"`
 	KPIs             []SaveKPIInput     `json:"kpis"`
 	CompetencyScores []CompScoreInput   `json:"competency_scores"`
@@ -201,13 +201,12 @@ type LoadMyFormData struct {
 	Summary         EvalSummary        `json:"summary"`
 }
 
-
 type EvalStep struct {
-    ID            int    `json:"id"`
-    AssignmentID  int    `json:"assignment_id"`
-    Idx           int    `json:"idx"`
-    EvaluatorID   int    `json:"evaluator_id"`
-    EvaluatorName string `json:"evaluator_name"`
-    Status        int    `json:"status"`
-    EvalDate      *string `json:"eval_date"`
+	ID            int     `json:"id"`
+	AssignmentID  int     `json:"assignment_id"`
+	Idx           int     `json:"idx"`
+	EvaluatorID   int     `json:"evaluator_id"`
+	EvaluatorName string  `json:"evaluator_name"`
+	Status        int     `json:"status"`
+	EvalDate      *string `json:"eval_date"`
 }

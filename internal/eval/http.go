@@ -1,9 +1,12 @@
 package eval
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"strconv"
 
+	"github.com/go-pdf/fpdf"
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -32,6 +35,9 @@ func (h *Handler) RegisterRoutes(r fiber.Router) {
 	r.Post("/forms/:id/steps/add", h.addEvalSteps)
 	r.Get("/forms/:id/steps", h.listEvalSteps)
 	r.Put("/forms/:id/steps/:stepId", h.updateEvalStep)
+
+	r.Get("/forms/:id/report.pdf", h.reportPDF)
+
 }
 
 func (h *Handler) createForm(c *fiber.Ctx) error {
@@ -330,4 +336,108 @@ func (h *Handler) updateEvalStep(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"error": "not found"})
 	}
 	return c.JSON(step)
+}
+
+// Report PDF
+func (h *Handler) reportPDF(c *fiber.Ctx) error {
+	formID, _ := strconv.Atoi(c.Params("id"))
+	uid, ok := currentUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"error": "unauthorized"})
+	}
+
+	// 1) ดึงข้อมูลการประเมินของผู้ใช้ (โค้ดที่คุณมีอยู่แล้ว)
+	data, err := h.Repo.LoadMyFormData(c.Context(), formID, uid)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// 2) สร้าง PDF (ใช้ go-pdf/fpdf แบบเบา ไม่ต้องมี Chrome)
+	pdf := fpdf.New("P", "mm", "A4", "")
+	pdf.SetMargins(15, 15, 15)
+	pdf.AddPage()
+
+	// ใส่ฟอนต์ไทย (แนะนำวางไฟล์ฟอนต์ไว้ข้าง binary เช่น NotoSansThai-Regular.ttf)
+	// ถ้าไม่มีฟอนต์ไทย ให้คอมเมนต์สองบรรทัดนี้ออกแล้วใช้ Arial ชั่วคราว
+	pdf.AddUTF8Font("Noto", "", "fonts/NotoSansThai-Regular.ttf")
+	if err := pdf.Error(); err != nil {
+		// fallback เป็น Arial ชั่วคราว
+		pdf.SetFont("Arial", "", 14)
+	} else {
+		pdf.SetFont("Noto", "", 14)
+	}
+
+	pdf.Cell(0, 8, fmt.Sprintf("รายงานการประเมินตนเอง (Form %d)", formID))
+	pdf.Ln(10)
+	pdf.SetFont("Noto", "", 12)
+	pdf.Cell(0, 6, fmt.Sprintf("สรุปรวม: %.2f%%   เกรด: %s", data.Summary.TotalPct, data.Summary.Grade))
+	pdf.Ln(8)
+
+	// --- ตาราง KPI ---
+	pdf.SetFont("Noto", "", 12)
+	pdf.Cell(0, 7, "KPI")
+	pdf.Ln(7)
+
+	// header
+	w := []float64{10, 75, 20, 20, 20} // #, ชื่อ, Max, Weight, Score
+	pdf.SetFillColor(245, 245, 245)
+	for i, h := range []string{"ลำดับ", "รายการ", "Max", "Weight", "Score"} {
+		align := "L"
+		if i > 1 {
+			align = "R"
+		}
+		pdf.CellFormat(w[i], 7, h, "1", 0, align, true, 0, "")
+	}
+	pdf.Ln(-1)
+
+	// rows
+	pdf.SetFillColor(255, 255, 255)
+	for i, k := range data.KPIs {
+		pdf.CellFormat(w[0], 7, fmt.Sprintf("%d", i+1), "1", 0, "C", false, 0, "")
+		pdf.CellFormat(w[1], 7, fmt.Sprintf("[%s] %s", k.Code, k.Title), "1", 0, "L", false, 0, "")
+		pdf.CellFormat(w[2], 7, fmt.Sprintf("%.1f", k.MaxScore), "1", 0, "R", false, 0, "")
+		pdf.CellFormat(w[3], 7, fmt.Sprintf("%d", k.Weight), "1", 0, "R", false, 0, "")
+		pdf.CellFormat(w[4], 7, fmt.Sprintf("%.1f", k.Score), "1", 0, "R", false, 0, "")
+		pdf.Ln(-1)
+	}
+
+	// --- ตาราง Competency ---
+	pdf.Ln(3)
+	pdf.Cell(0, 7, "Competency")
+	pdf.Ln(7)
+
+	wc := []float64{10, 85, 25, 25, 25} // #, ชื่อ, Max, Weight, Score
+	pdf.SetFillColor(245, 245, 245)
+	for i, h := range []string{"ลำดับ", "หัวข้อ", "Max", "Weight", "Score"} {
+		align := "L"
+		if i > 1 {
+			align = "R"
+		}
+		pdf.CellFormat(wc[i], 7, h, "1", 0, align, true, 0, "")
+	}
+	pdf.Ln(-1)
+	for i, cpt := range data.Competencies {
+		pdf.CellFormat(wc[0], 7, fmt.Sprintf("%d", i+1), "1", 0, "C", false, 0, "")
+		pdf.CellFormat(wc[1], 7, cpt.Title, "1", 0, "L", false, 0, "")
+		pdf.CellFormat(wc[2], 7, fmt.Sprintf("%.1f", cpt.MaxScore), "1", 0, "R", false, 0, "")
+		pdf.CellFormat(wc[3], 7, fmt.Sprintf("%.2f", cpt.Weight), "1", 0, "R", false, 0, "")
+		pdf.CellFormat(wc[4], 7, fmt.Sprintf("%.1f", cpt.Score), "1", 0, "R", false, 0, "")
+		pdf.Ln(-1)
+	}
+
+	// --- TA / Notes ---
+	pdf.Ln(4)
+	pdf.Cell(0, 6, fmt.Sprintf("Time Attendance: %.1f / %.1f (%.1f%%)",
+		data.TimeAttendance.Score, data.TimeAttendance.FullScore,
+		(data.TimeAttendance.Score/data.TimeAttendance.FullScore)*100))
+	pdf.Ln(8)
+
+	// 3) ส่งเป็นไฟล์ดาวน์โหลดทันที
+	var buf bytes.Buffer
+	if err := pdf.Output(&buf); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	c.Set("Content-Type", "application/pdf")
+	c.Set("Content-Disposition", "attachment; filename=eval-report.pdf")
+	return c.SendStream(bytes.NewReader(buf.Bytes()))
 }

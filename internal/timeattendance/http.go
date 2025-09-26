@@ -16,7 +16,6 @@ type Handler struct{ Repo *Repo }
 
 func NewHandler(r *Repo) *Handler { return &Handler{Repo: r} }
 
-// ✅ เส้นทางใช้ token ทั้งคู่
 func (h *Handler) RegisterRoutes(r fiber.Router) {
 	r.Get("/timeattendance/v2", h.get)
 	r.Put("/timeattendance", h.put)
@@ -120,7 +119,6 @@ func (h *Handler) getbyID(c *fiber.Ctx) error {
 
 	if !ok {
 		return c.Status(404).JSON(fiber.Map{"error": "not found"})
-
 	}
 
 	return c.JSON(out)
